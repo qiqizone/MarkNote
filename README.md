@@ -1,2 +1,2 @@
 # MarkNote
-A note-taking app that's kind of like OneNote, but also supports Markdown
+A note-taking app that's like OneNote style, but also supports Markdown, and works on Windows and web browsers.
