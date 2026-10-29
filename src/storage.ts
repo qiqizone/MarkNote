@@ -1,7 +1,7 @@
 import { BLOCK_WIDTH_PRESET } from './types'
 import type { NoteBlock, NotePage, Notebook, PageWidth } from './types'
 
-const WORKSPACE_KEY = 'mnote.workspace.v9'
+const WORKSPACE_KEY = 'mnote.workspace.v10'
 const UI_KEY = 'mnote.ui.v1'
 
 export interface UiState {

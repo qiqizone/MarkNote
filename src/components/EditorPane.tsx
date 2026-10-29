@@ -15,7 +15,7 @@ import { Markdown } from 'tiptap-markdown'
 import CodeMirror from '@uiw/react-codemirror'
 import { markdown as markdownLanguage } from '@codemirror/lang-markdown'
 import { EditorView } from '@codemirror/view'
-import type { EditorMode, NoteBlock, NotePage, PageWidth } from '../types'
+import type { BlockType, EditorMode, NoteBlock, NotePage, PageWidth } from '../types'
 
 /** 支持字体、字号、颜色的 TextStyle（格式模式使用） */
 const NoteTextStyle = TextStyle.extend({
@@ -80,7 +80,8 @@ const extensions = [
   }),
 ]
 
-// 文档类型的编辑区不带 Markdown 解析，粘贴 Markdown 语法时保持纯文本
+// 文档类型的编辑区不解析 Markdown：去掉 Markdown 扩展，并在编辑器上关掉输入/粘贴规则，
+// 输入的 ## 标题、** 加粗、- 列表等 Markdown 语法始终保持字面文本
 const docExtensions = [
   ...extensions.filter(
     (extension) => extension.name !== 'markdown' && extension.name !== 'placeholder',
@@ -93,15 +94,30 @@ function readMarkdown(editor: { storage: unknown }) {
   return storage.markdown?.getMarkdown() ?? ''
 }
 
+/** 文档模式把 Markdown 原文按行作为普通文本加载，不再解析语法 */
+function literalDocFromMarkdown(markdown: string): Record<string, unknown> {
+  const lines = markdown.split('\n')
+  return {
+    type: 'doc',
+    content: lines.map((line) =>
+      line
+        ? { type: 'paragraph', content: [{ type: 'text', text: line }] }
+        : { type: 'paragraph' },
+    ),
+  }
+}
+
 function RichEditor({
   content,
   kind,
+  editable,
   onChange,
   onReady,
   onActivate,
 }: {
   content: string | Record<string, unknown>
   kind: 'markdown' | 'doc'
+  editable: boolean
   onChange: (patch: BlockPatch) => void
   onReady: (editor: Editor) => void
   onActivate: (editor: Editor) => void
@@ -109,13 +125,20 @@ function RichEditor({
   const editor = useEditor({
     extensions: kind === 'doc' ? docExtensions : extensions,
     content: content as string,
+    editable,
     autofocus: false,
+    // 文档类型不把 Markdown 语法自动转换（## 标题、** 加粗、- 列表等）
+    enableInputRules: kind !== 'doc',
+    enablePasteRules: kind !== 'doc',
     editorProps: {
       attributes: { class: 'prose', spellcheck: 'false' },
     },
     onUpdate: ({ editor: current }) => {
       if (kind === 'doc') {
-        onChange({ doc: current.getJSON() as Record<string, unknown> })
+        onChange({
+          doc: current.getJSON() as Record<string, unknown>,
+          markdown: current.getText({ blockSeparator: '\n' }),
+        })
       } else {
         onChange({ markdown: readMarkdown(current) })
       }
@@ -129,8 +152,14 @@ function RichEditor({
   })
 
   useEffect(() => {
+    // 只在编辑器实例变化时上报，避免父组件重渲染时反复触发
     if (editor) onReady(editor)
-  }, [editor, onReady])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editor])
+
+  useEffect(() => {
+    editor?.setEditable(editable)
+  }, [editor, editable])
 
   return <EditorContent editor={editor} />
 }
@@ -330,11 +359,13 @@ function FormatBar({ editor }: { editor: Editor | null }) {
 interface Props {
   page: NotePage
   mode: EditorMode
+  reading: boolean
   lastSaved: number
   onModeChange: (mode: EditorMode) => void
+  onReadingChange: (reading: boolean) => void
   onBlockChange: (blockId: string, patch: BlockPatch) => void
   onAddBlock: () => void
-  onAddDocBlock: () => void
+  onTypeChange: (blockId: string, type: BlockType) => void
   onRemoveBlock: (blockId: string) => void
   onResizeBlock: (blockId: string, width: number) => void
   onMoveBlock: (blockId: string, x: number, y: number) => void
@@ -412,11 +443,13 @@ function findSnap(
 export default function EditorPane({
   page,
   mode,
+  reading,
   lastSaved,
   onModeChange,
+  onReadingChange,
   onBlockChange,
   onAddBlock,
-  onAddDocBlock,
+  onTypeChange,
   onRemoveBlock,
   onResizeBlock,
   onMoveBlock,
@@ -435,10 +468,13 @@ export default function EditorPane({
   const [activeBlockId, setActiveBlockId] = useState<string | null>(null)
   const [, bumpToolbar] = useState(0)
 
-  // 工具栏只作用于当前选中的「文档」编辑区
+  // 阅读模式固定用 Markdown 预览，不进入源码
+  const effectiveMode: EditorMode = reading ? 'rich' : mode
+
+  // 工具栏只作用于当前选中的「文档」编辑区，阅读模式下不显示
   const activeBlock = page.blocks.find((block) => block.id === activeBlockId)
   const activeEditor = activeBlockId ? editorRefs.current.get(activeBlockId) ?? null : null
-  const formatEditor = activeBlock?.type === 'doc' ? activeEditor : null
+  const formatEditor = !reading && activeBlock?.type === 'doc' ? activeEditor : null
 
   const handleActivate = useCallback(
     (blockId: string) => {
@@ -483,7 +519,7 @@ export default function EditorPane({
     })
     canvas.querySelectorAll<HTMLElement>('.block').forEach((node) => observer.observe(node))
     return () => observer.disconnect()
-  }, [blockIds, page.zoom, mode, richKey])
+  }, [blockIds, page.zoom, mode, richKey, reading])
 
   const contentRight = page.blocks.reduce(
     (max, block) => Math.max(max, block.x + block.width),
@@ -502,7 +538,7 @@ export default function EditorPane({
   }))
 
   const handleCanvasClick = (event: React.MouseEvent<HTMLDivElement>) => {
-    if (mode !== 'rich') return
+    if (reading || mode !== 'rich') return
     const target = event.target as HTMLElement
     if (target.closest('.block')) return
     // 点击画布空白处：定位到最后一个编辑区继续写
@@ -531,106 +567,144 @@ export default function EditorPane({
   }
 
   return (
-    <div className="doc">
+    <div className={reading ? 'doc reading' : 'doc'}>
       <div className="doc-head">
         <input
           className="doc-title"
           value={page.title}
           placeholder="无标题页面"
           aria-label="页面标题"
+          readOnly={reading}
           onChange={(event) => onTitleChange(event.target.value)}
         />
         <div className="mode-switch">
-          <div className="mode-seg" role="group" aria-label="Markdown 编辑方式">
+          <div className="mode-seg view-seg" role="group" aria-label="视图模式">
             <button
               type="button"
-              className={mode === 'rich' ? 'active' : ''}
-              onClick={() => onModeChange('rich')}
+              className={!reading ? 'active' : ''}
+              onClick={() => onReadingChange(false)}
+              title="编辑模式：可编辑、可拖动、可设置格式"
             >
-              Markdown
+              编辑
             </button>
             <button
               type="button"
-              className={mode === 'source' ? 'active' : ''}
-              onClick={() => onModeChange('source')}
+              className={reading ? 'active' : ''}
+              onClick={() => onReadingChange(true)}
+              title="阅读模式：只读浏览，隐藏所有编辑控件"
             >
-              源码
+              阅读
             </button>
           </div>
-          <button
-            type="button"
-            className="mode-doc"
-            onClick={() => onAddDocBlock()}
-            title="在右侧新增一个文档编辑区（支持字体、颜色、对齐）"
-          >
-            ＋ 文档区
-          </button>
-        </div>
-      </div>
-
-      {formatEditor && <FormatBar editor={formatEditor} />}
-
-      <div className="doc-meta-row">
-        <div className="meta">
-          <span className="save-dot" />
-          已保存 {formatSavedTime(lastSaved)}
-          <span className="meta-divider">·</span>
-          约 {charCount} 字
-          <span className="meta-divider">·</span>
-          {page.blocks.length} 个编辑区
-          <span className="meta-divider">·</span>
-          {mode === 'rich' ? 'Markdown 预览' : 'Markdown 源码'}
-        </div>
-        <div className="doc-controls">
-          <div className="width-seg" role="group" aria-label="编辑区预设宽度">
-            {WIDTH_OPTIONS.map((option) => (
+          {!reading && (
+            <div className="mode-seg" role="group" aria-label="Markdown 编辑方式">
               <button
-                key={option.value}
                 type="button"
-                className={page.width === option.value ? 'active' : ''}
-                onClick={() => onWidthChange(option.value)}
-                title="把所有编辑区设为该宽度并横向排开"
+                className={mode === 'rich' ? 'active' : ''}
+                disabled={activeBlock?.type === 'doc'}
+                onClick={() => onModeChange('rich')}
+                title={
+                  activeBlock?.type === 'doc' ? '文档编辑区不支持源码/预览切换' : 'Markdown 预览'
+                }
               >
-                {option.label}
+                Markdown
               </button>
-            ))}
-          </div>
-          <div className="zoom">
-            <button type="button" onClick={() => zoomStep(-10)} title="缩小">
-              −
-            </button>
-            <span
-              className="zoom-label"
-              title="双击恢复 100%"
-              onDoubleClick={() => onZoomChange(100)}
-            >
-              {page.zoom}%
-            </span>
-            <button type="button" onClick={() => zoomStep(10)} title="放大">
-              ＋
-            </button>
+              <button
+                type="button"
+                className={mode === 'source' ? 'active' : ''}
+                disabled={activeBlock?.type === 'doc'}
+                onClick={() => onModeChange('source')}
+                title={
+                  activeBlock?.type === 'doc' ? '文档编辑区不支持源码/预览切换' : 'Markdown 源码'
+                }
+              >
+                源码
+              </button>
+            </div>
+          )}
+          <div className="doc-controls">
+            {!reading && (
+              <div className="width-seg" role="group" aria-label="编辑区预设宽度">
+                {WIDTH_OPTIONS.map((option) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    className={page.width === option.value ? 'active' : ''}
+                    onClick={() => onWidthChange(option.value)}
+                    title="把所有编辑区设为该宽度并横向排开"
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+            )}
+            <div className="zoom">
+              <button type="button" onClick={() => zoomStep(-10)} title="缩小">
+                −
+              </button>
+              <span
+                className="zoom-label"
+                title="双击恢复 100%"
+                onDoubleClick={() => onZoomChange(100)}
+              >
+                {page.zoom}%
+              </span>
+              <button type="button" onClick={() => zoomStep(10)} title="放大">
+                ＋
+              </button>
+            </div>
           </div>
         </div>
       </div>
+
+      {/* 格式条放在常驻的状态行里，切换类型时不会多出一行把画布往下挤 */}
+      {!reading && (
+        <div className="doc-meta-row">
+          {formatEditor ? (
+            <FormatBar editor={formatEditor} />
+          ) : (
+            <div className="meta">
+              <span className="save-dot" />
+              已保存 {formatSavedTime(lastSaved)}
+              <span className="meta-divider">·</span>
+              约 {charCount} 字
+              <span className="meta-divider">·</span>
+              {page.blocks.length} 个编辑区
+              <span className="meta-divider">·</span>
+              {mode === 'rich' ? 'Markdown 预览' : 'Markdown 源码'}
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="doc-scroll" ref={scrollRef} onClick={handleCanvasClick}>
         <div
           className="canvas"
           ref={canvasRef}
-          style={{ zoom: page.zoom / 100, width: contentRight + 160, height: contentBottom + 160 } as React.CSSProperties}
+          style={{
+            zoom: page.zoom / 100,
+            // 阅读模式按内容宽度收窄，配合 margin auto 让内容居中
+            width: reading ? contentRight : contentRight + 160,
+            height: contentBottom + 160,
+          } as React.CSSProperties}
         >
           {page.blocks.map((block) => (
             <BlockEditor
               key={`${page.id}-${block.id}-${
-                block.type === 'doc' ? 'doc' : mode === 'source' ? 'src' : richKey
+                block.type === 'doc' ? 'doc' : effectiveMode === 'source' ? 'src' : richKey
               }`}
               block={block}
-              mode={mode}
+              mode={effectiveMode}
+              reading={reading}
               zoom={page.zoom}
               removable={page.blocks.length > 1}
               onChange={(patch) => onBlockChange(block.id, patch)}
-              onReady={(editor) => editorRefs.current.set(block.id, editor)}
+              onReady={(editor) => {
+                editorRefs.current.set(block.id, editor)
+                bumpToolbar((value) => value + 1)
+              }}
               onActivate={() => handleActivate(block.id)}
+              onTypeChange={(type) => onTypeChange(block.id, type)}
               onRemove={() => onRemoveBlock(block.id)}
               onResize={(width) => onResizeBlock(block.id, width)}
               onMove={(x, y) => onMoveBlock(block.id, x, y)}
@@ -639,19 +713,21 @@ export default function EditorPane({
             />
           ))}
 
-          <button
-            type="button"
-            className="block-add"
-            style={{ left: contentRight + BLOCK_GAP }}
-            onClick={(event) => {
-              event.stopPropagation()
-              onAddBlock()
-            }}
-            title="在右侧新增一个编辑区"
-          >
-            <span className="block-add-plus">＋</span>
-            <span className="block-add-label">新编辑区</span>
-          </button>
+          {!reading && (
+            <button
+              type="button"
+              className="block-add"
+              style={{ left: contentRight + BLOCK_GAP }}
+              onClick={(event) => {
+                event.stopPropagation()
+                onAddBlock()
+              }}
+              title="在右侧新增一个编辑区"
+            >
+              <span className="block-add-plus">＋</span>
+              <span className="block-add-label">新编辑区</span>
+            </button>
+          )}
 
           {guides.x !== null && <div className="snap-guide vertical" style={{ left: guides.x }} />}
           {guides.y !== null && <div className="snap-guide horizontal" style={{ top: guides.y }} />}
@@ -664,11 +740,13 @@ export default function EditorPane({
 function BlockEditor({
   block,
   mode,
+  reading,
   zoom,
   removable,
   onChange,
   onReady,
   onActivate,
+  onTypeChange,
   onRemove,
   onResize,
   onMove,
@@ -677,11 +755,13 @@ function BlockEditor({
 }: {
   block: NoteBlock
   mode: EditorMode
+  reading: boolean
   zoom: number
   removable: boolean
   onChange: (patch: BlockPatch) => void
   onReady: (editor: Editor) => void
   onActivate: () => void
+  onTypeChange: (type: BlockType) => void
   onRemove: () => void
   onResize: (width: number) => void
   onMove: (x: number, y: number) => void
@@ -804,18 +884,48 @@ function BlockEditor({
       className="block"
       data-block-id={block.id}
       style={{ left: position.x, top: position.y, width }}
-      onMouseDown={() => onActivate()}
+      onMouseDown={reading ? undefined : () => onActivate()}
     >
-      <button
-        type="button"
-        className="block-grip"
-        onMouseDown={handleDragStart}
-        title="拖动编辑区位置"
-        aria-label="拖动编辑区位置"
-      >
-        ⠿
-      </button>
-      {removable && (
+      {!reading && (
+        <button
+          type="button"
+          className="block-grip"
+          onMouseDown={handleDragStart}
+          title="拖动编辑区位置"
+          aria-label="拖动编辑区位置"
+        >
+          ⠿
+        </button>
+      )}
+      {!reading && (
+        <div className="block-type" role="group" aria-label="编辑区类型">
+          <button
+            type="button"
+            className={block.type === 'markdown' ? 'active' : ''}
+            title="Markdown 类型：解析 Markdown 语法显示"
+            onClick={(event) => {
+              event.stopPropagation()
+              onActivate()
+              onTypeChange('markdown')
+            }}
+          >
+            M
+          </button>
+          <button
+            type="button"
+            className={block.type === 'doc' ? 'active' : ''}
+            title="文档类型：按普通文本显示，可设置字体、颜色、对齐"
+            onClick={(event) => {
+              event.stopPropagation()
+              onActivate()
+              onTypeChange('doc')
+            }}
+          >
+            D
+          </button>
+        </div>
+      )}
+      {removable && !reading && (
         <button
           type="button"
           className="block-del"
@@ -832,7 +942,8 @@ function BlockEditor({
       {block.type === 'doc' ? (
         <RichEditor
           kind="doc"
-          content={block.doc ?? ''}
+          editable={!reading}
+          content={block.doc ?? literalDocFromMarkdown(block.markdown)}
           onChange={(patch) => onChange(patch)}
           onReady={onReady}
           onActivate={() => onActivate()}
@@ -845,21 +956,24 @@ function BlockEditor({
       ) : (
         <RichEditor
           kind="markdown"
+          editable={!reading}
           content={block.markdown}
           onChange={(patch) => onChange(patch)}
           onReady={onReady}
           onActivate={() => onActivate()}
         />
       )}
-      <div
-        className="block-resize"
-        role="separator"
-        aria-orientation="vertical"
-        aria-label="拖拽调整编辑区宽度"
-        title="拖拽调整宽度，双击恢复预设"
-        onMouseDown={handleResizeStart}
-        onDoubleClick={() => onResize(0)}
-      />
+      {!reading && (
+        <div
+          className="block-resize"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="拖拽调整编辑区宽度"
+          title="拖拽调整宽度，双击恢复预设"
+          onMouseDown={handleResizeStart}
+          onDoubleClick={() => onResize(0)}
+        />
+      )}
     </div>
   )
 }

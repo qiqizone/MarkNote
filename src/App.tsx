@@ -3,6 +3,7 @@ import SectionTabs from './components/SectionTabs'
 import PageList from './components/PageList'
 import EditorPane from './components/EditorPane'
 import { createSeedNotebook } from './seed'
+import { mergeDocWithText } from './docMerge'
 import { loadUiState, loadWorkspace, saveUiState, saveWorkspace, uid } from './storage'
 import { BLOCK_WIDTH_PRESET } from './types'
 import type { BlockType, EditorMode, NoteBlock, NotePage, Notebook, PageWidth } from './types'
@@ -42,6 +43,7 @@ export default function App() {
   const [activePageId, setActivePageId] = useState(() => resolveInitial(notebook).pageId)
   const [mode, setMode] = useState<EditorMode>(() => resolveInitial(notebook).mode)
   const [query, setQuery] = useState('')
+  const [reading, setReading] = useState(false)
   const [lastSaved, setLastSaved] = useState(() => Date.now())
 
   const activeSection = notebook.sections.find((section) => section.id === activeSectionId)
@@ -110,8 +112,8 @@ export default function App() {
                     if (block.id !== blockId) return block
                     const next: NoteBlock = { ...block }
                     if (typeof patch.markdown === 'string') next.markdown = patch.markdown
-                    if (patch.doc === null) delete next.doc
-                    else if (patch.doc) next.doc = patch.doc
+                    if (patch.doc) next.doc = patch.doc
+                    else if (patch.doc === null) delete next.doc
                     return next
                   }),
                   updatedAt: Date.now(),
@@ -124,7 +126,7 @@ export default function App() {
     [],
   )
 
-  const addBlock = useCallback((pageId: string, type: BlockType = 'markdown') => {
+  const addBlock = useCallback((pageId: string) => {
     setNotebook((previous) => ({
       ...previous,
       sections: previous.sections.map((section) => ({
@@ -134,7 +136,7 @@ export default function App() {
           const right = page.blocks.reduce((max, block) => Math.max(max, block.x + block.width), 0)
           const block: NoteBlock = {
             id: uid('block'),
-            type,
+            type: 'markdown',
             markdown: '',
             x: page.blocks.length > 0 ? right + 24 : 0,
             y: 0,
@@ -142,6 +144,34 @@ export default function App() {
           }
           return { ...page, blocks: [...page.blocks, block], updatedAt: Date.now() }
         }),
+      })),
+    }))
+  }, [])
+
+  const setBlockType = useCallback((pageId: string, blockId: string, type: BlockType) => {
+    setNotebook((previous) => ({
+      ...previous,
+      sections: previous.sections.map((section) => ({
+        ...section,
+        pages: section.pages.map((page) =>
+          page.id === pageId
+            ? {
+                ...page,
+                blocks: page.blocks.map((block) => {
+                  if (block.id !== blockId) return block
+                  // 保留文档结构：切到 Markdown 只是换一种显示方式；
+                  // 再切回文档时把 M 里改过的文本合并回去，颜色、字体等格式不丢失
+                  const next: NoteBlock = { ...block, type }
+                  if (type === 'doc' && next.doc) {
+                    const merged = mergeDocWithText(next.doc, next.markdown)
+                    if (merged) next.doc = merged
+                    else delete next.doc
+                  }
+                  return next
+                }),
+              }
+            : page,
+        ),
       })),
     }))
   }, [])
@@ -353,11 +383,13 @@ export default function App() {
             key={activePage.id}
             page={activePage}
             mode={mode}
+            reading={reading}
             lastSaved={lastSaved}
             onModeChange={setMode}
+            onReadingChange={setReading}
             onBlockChange={(blockId, patch) => updateBlock(activePage.id, blockId, patch)}
             onAddBlock={() => addBlock(activePage.id)}
-            onAddDocBlock={() => addBlock(activePage.id, 'doc')}
+            onTypeChange={(blockId, type) => setBlockType(activePage.id, blockId, type)}
             onRemoveBlock={(blockId) => deleteBlock(activePage.id, blockId)}
             onTitleChange={(title) => updatePage(activePage.id, { title })}
             onZoomChange={(zoom) => updatePage(activePage.id, { zoom }, false)}
