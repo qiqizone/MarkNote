@@ -1,0 +1,25 @@
+# 依赖
+node_modules/
+
+# 构建产物
+dist/
+dist-ssr/
+
+# 工具临时产物
+.trae-html-share-packages/
+.vite/
+
+# 日志与本地配置
+*.log
+npm-debug.log*
+*.local
+.env
+.env.*
+!.env.example
+
+# 编辑器 / 系统
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
